@@ -1918,9 +1918,20 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 		return false
 	}
 	if capability == OpenAIEndpointCapabilitySeedance {
-		configured, _ := a.openAIEndpointCapabilitySet()
-		return configured["seedance"] && a.Platform == PlatformOpenAI && a.Type == AccountTypeAPIKey &&
-			strings.TrimSpace(a.GetCredential("base_url")) != ""
+		if a.Platform != PlatformOpenAI || a.Type != AccountTypeAPIKey {
+			return false
+		}
+		baseURL := strings.TrimSpace(a.GetCredential("base_url"))
+		if baseURL == "" {
+			return false
+		}
+		if configured, found := a.openAIEndpointCapabilitySet(); found && len(configured) > 0 {
+			return configured["seedance"]
+		}
+		// Fall back to the host so Ark / BytePlus / LAS accounts work without a
+		// hand-edited capability list.
+		base := strings.ToLower(baseURL)
+		return strings.Contains(base, "volces.com") || strings.Contains(base, "bytepluses.com")
 	}
 	// Alibaba Bailian (DashScope) native video protocol. Accept an explicit
 	// "wan" capability, or fall back to the account base URL host so operators

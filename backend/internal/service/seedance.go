@@ -56,9 +56,16 @@ func ParseSeedanceRequest(body []byte) (GrokMediaRequestInfo, error) {
 
 func buildSeedanceURL(base string, endpoint GrokMediaEndpoint, taskID string) (string, error) {
 	base = strings.TrimRight(base, "/")
-	// Accept an origin, a proxy prefix, or the full Ark API base.
-	if !strings.HasSuffix(base, "/api/v3") && !strings.HasSuffix(base, "/v3") {
-		base += "/api/v3"
+	// Volcengine LAS (AI 数据湖 / operator gateway) serves the same "contents
+	// generations" resource under /api/v1 with a DashScope-like envelope, while
+	// Ark serves it under /api/v3. Pick the version from the configured host so
+	// one provider covers both deployments.
+	apiVersion := "/api/v3"
+	if isSeedanceLASBase(base) {
+		apiVersion = "/api/v1"
+	}
+	if !strings.HasSuffix(base, apiVersion) && !strings.HasSuffix(base, strings.TrimPrefix(apiVersion, "/api")) {
+		base += apiVersion
 	}
 	base += "/contents/generations/tasks"
 	if endpoint != SeedanceEndpointCreate {
@@ -68,6 +75,13 @@ func buildSeedanceURL(base string, endpoint GrokMediaEndpoint, taskID string) (s
 		base += "/" + taskID
 	}
 	return base, nil
+}
+
+// isSeedanceLASBase reports whether the account points at the LAS operator
+// gateway instead of Ark.
+func isSeedanceLASBase(base string) bool {
+	b := strings.ToLower(base)
+	return strings.Contains(b, "operator.las.") || strings.Contains(b, "las.cn-beijing") || strings.Contains(b, "las.cn-shanghai")
 }
 
 // ForwardSeedance preserves the Ark protocol, including multimodal content and
@@ -137,7 +151,11 @@ func (s *OpenAIGatewayService) ForwardSeedance(ctx context.Context, c *gin.Conte
 	}
 	result := &OpenAIForwardResult{Model: model, BillingModel: model, UpstreamModel: upstreamModel, Duration: time.Since(started), ResponseHeaders: resp.Header.Clone()}
 	if endpoint == SeedanceEndpointCreate {
-		id := strings.TrimSpace(gjson.GetBytes(responseBody, "id").String())
+		// Ark returns {"id": "..."}; LAS returns {"output":{"task_id":"..."}}.
+		id := strings.TrimSpace(firstNonEmptyString(
+			gjson.GetBytes(responseBody, "id").String(),
+			gjson.GetBytes(responseBody, "output.task_id").String(),
+		))
 		if id == "" {
 			return nil, fmt.Errorf("seedance create response missing task ID")
 		}
@@ -145,9 +163,35 @@ func (s *OpenAIGatewayService) ForwardSeedance(ctx context.Context, c *gin.Conte
 	}
 	if endpoint == SeedanceEndpointStatus {
 		result.ResponseID = taskID
-		result.UpstreamModel = gjson.GetBytes(responseBody, "model").String()
-		if gjson.GetBytes(responseBody, "status").String() == "succeeded" {
+		result.UpstreamModel = firstNonEmptyString(
+			gjson.GetBytes(responseBody, "model").String(),
+			gjson.GetBytes(responseBody, "output.model").String(),
+		)
+		// Ark: status/model/content.video_url. LAS: output.task_status/output.video_url.
+		status := strings.ToLower(strings.TrimSpace(firstNonEmptyString(
+			gjson.GetBytes(responseBody, "status").String(),
+			gjson.GetBytes(responseBody, "output.task_status").String(),
+		)))
+		videoURL := firstNonEmptyString(
+			gjson.GetBytes(responseBody, "content.video_url").String(),
+			gjson.GetBytes(responseBody, "output.video_url").String(),
+		)
+		if status == "succeeded" {
 			result.Usage.OutputTokens = max(0, int(gjson.GetBytes(responseBody, "usage.completion_tokens").Int()))
+			if strings.TrimSpace(videoURL) != "" {
+				result.VideoCount = 1
+				if d := gjson.GetBytes(responseBody, "usage.duration"); d.Exists() {
+					result.VideoDurationSeconds = int(d.Float())
+				}
+				switch sr := int(gjson.GetBytes(responseBody, "usage.SR").Int()); {
+				case sr >= 1080:
+					result.VideoResolution = "1080p"
+				case sr >= 720:
+					result.VideoResolution = "720p"
+				case sr > 0:
+					result.VideoResolution = "480p"
+				}
+			}
 		}
 	}
 	writeGrokMediaResponse(c, resp, responseBody, s.responseHeaderFilter)
