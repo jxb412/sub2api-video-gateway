@@ -1232,7 +1232,7 @@ func buildOpenAIAPIKeyModelsRequest(ctx context.Context, account *Account, valid
 		return nil, newUpstreamModelSyncConfigError("Invalid OpenAI base URL", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, buildOpenAIModelsURL(normalizedBaseURL), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, buildOpenAIModelsURLForDiscovery(normalizedBaseURL), nil)
 	if err != nil {
 		return nil, newUpstreamModelSyncConfigError("Invalid OpenAI model list URL", err)
 	}
@@ -1423,6 +1423,42 @@ func buildV1ModelsURL(base string) string {
 
 func buildOpenAIModelsURL(base string) string {
 	return buildOpenAIEndpointURL(base, "/v1/models")
+}
+
+// buildOpenAIModelsURLForDiscovery is buildOpenAIModelsURL with a vendor-aware
+// fallback for OpenAI-compatible gateways that publish their catalogue under a
+// different path. Alibaba Bailian (DashScope) MaaS roots answer /v1/models with
+// 404 while /compatible-mode/v1/models returns the full model list, so the admin
+// "sync supported models" button would otherwise always fail for those accounts.
+func buildOpenAIModelsURLForDiscovery(base string) string {
+	if compatibleModels := dashScopeCompatibleModelsURL(base); compatibleModels != "" {
+		return compatibleModels
+	}
+	return buildOpenAIModelsURL(base)
+}
+
+// dashScopeCompatibleModelsURL returns the Bailian compatible-mode model list URL
+// for DashScope/MaaS hosts, or "" when the host is not one of them.
+func dashScopeCompatibleModelsURL(base string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(base), "/")
+	if trimmed == "" {
+		return ""
+	}
+	lower := strings.ToLower(trimmed)
+	isDashScopeHost := strings.Contains(lower, "maas.aliyuncs.com") ||
+		strings.Contains(lower, "dashscope.aliyuncs.com") ||
+		strings.Contains(lower, "dashscope-intl.aliyuncs.com")
+	if !isDashScopeHost {
+		return ""
+	}
+	// Strip any trailing path so a configured ".../compatible-mode/v1" or
+	// ".../api/v1" base still resolves to the same catalogue endpoint.
+	if idx := strings.Index(lower, "/compatible-mode/"); idx > 0 {
+		trimmed = trimmed[:idx]
+	} else if idx := strings.Index(lower, "/api/v1"); idx > 0 {
+		trimmed = trimmed[:idx]
+	}
+	return trimmed + "/compatible-mode/v1/models"
 }
 
 // buildVertexPublisherModelsURL 构造 Google 发布方模型列表地址。该接口只有 v1beta1 版本，pageSize 上限 300。
